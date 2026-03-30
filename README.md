@@ -7,17 +7,26 @@ destroys the mount on exit.
 ## Usage
 
 ```
-cryptmp [-s SIZE] [COMMAND [ARGS...]]
+cryptmp [-s SIZE] [-n] [COMMAND [ARGS...]]
 ```
 
 ```bash
-cryptmp                        # interactive shell
-cryptmp glumi ./network.ts     # run a command
-cryptmp -s 1G make deploy      # 1GB scratch space
-CRYPTMP_SIZE=2G cryptmp bash   # via env var
+cryptmp                        # encrypted RAM disk + interactive shell
+cryptmp -n make deploy         # plain RAM disk (faster on macOS)
+cryptmp --size 1G glumi ./n.ts # 1GB encrypted scratch space
+cryptmp -s 256M -n sh          # small, unencrypted
+CRYPTMP_ENCRYPT=0 cryptmp sh   # plain via env var
 ```
 
-Size precedence: `-s` flag > `CRYPTMP_SIZE` env var > `512M` default.
+### Options
+
+| Short | Long | Env var | Description |
+|-------|------|---------|-------------|
+| `-s` | `--size SIZE` | `CRYPTMP_SIZE` | Mount size (e.g., `256M`, `1G`). Default: `512M` |
+| `-n` | `--no-encrypt` | `CRYPTMP_ENCRYPT=0` | Skip encryption (plain RAM disk) |
+| `-h` | `--help` | | Show help |
+
+Flag takes precedence over env var.
 
 ## How it works
 
@@ -26,7 +35,8 @@ Size precedence: `-s` flag > `CRYPTMP_SIZE` env var > `512M` default.
 Creates a `tmpfs` mount inside a private mount namespace via `unshare`. The
 namespace is invisible to all other processes. When the process dies — for any
 reason, including SIGKILL — the kernel tears down the namespace and everything
-in it. No cleanup code needed.
+in it. No cleanup code needed. `tmpfs` is always unencrypted RAM, so `-n` has
+no effect on Linux.
 
 ### macOS
 
@@ -35,6 +45,13 @@ random one-time passphrase, and mounts it at `/Volumes/cryptmp-<PID>`. Cleanup
 is trap-based (`hdiutil detach` on EXIT). If a session is killed hard (SIGKILL),
 the orphaned volume is encrypted with a key that no longer exists. A startup
 reaper detects and cleans up stale volumes from dead PIDs on next run.
+
+### macOS performance
+
+APFS encryption adds ~2 seconds to startup on macOS due to the multi-step
+volume creation process (create RAM device, initialize APFS container, delete
+unencrypted volume, add encrypted volume). Use `-n` / `--no-encrypt` to skip
+encryption when the data doesn't require it — startup drops to ~1 second.
 
 ### macOS note: mktemp
 
