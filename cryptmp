@@ -21,8 +21,7 @@ Options:
   -n, --no-encrypt
                 Skip encryption (plain RAM disk). On macOS, APFS
                 encryption adds ~2s to startup; this flag skips it.
-                On Linux, tmpfs is always unencrypted RAM, so this
-                flag has no effect.
+                On Linux, skips gocryptfs overlay.
                 Also settable via CRYPTMP_ENCRYPT=0 env var.
   -h, --help    Show this help.
 
@@ -125,11 +124,55 @@ run_linux() {
     size="$1"
     shift
 
+    if [ "$ENCRYPT" = "1" ] && command -v gocryptfs >/dev/null 2>&1; then
+        run_linux_encrypted "$size" "$@"
+    else
+        if [ "$ENCRYPT" = "1" ] && ! command -v gocryptfs >/dev/null 2>&1; then
+            echo "cryptmp: gocryptfs not found, falling back to unencrypted tmpfs" >&2
+            echo "cryptmp: install gocryptfs for encryption on Linux" >&2
+        fi
+        run_linux_plain "$size" "$@"
+    fi
+}
+
+run_linux_plain() {
+    size="$1"
+    shift
+
     setup_cmd="
 MOUNT_POINT=\$(mktemp -d /tmp/cryptmp-\$\$.XXXXXX)
 mount -t tmpfs -o size=$size,mode=0700 tmpfs \"\$MOUNT_POINT\"
 export TMPDIR=\"\$MOUNT_POINT\"
 cd \"\$MOUNT_POINT\"
+"
+
+    if [ $# -eq 0 ]; then
+        exec unshare -m -r --propagation private /bin/sh -c \
+            "${setup_cmd}export SHELL=\"$USER_SHELL\"; exec $USER_SHELL"
+    else
+        exec unshare -m -r --propagation private /bin/sh -c \
+            "${setup_cmd}"'exec "$@"' -- "$@"
+    fi
+}
+
+run_linux_encrypted() {
+    size="$1"
+    shift
+
+    # gocryptfs encrypted tmpfs:
+    # 1. Mount tmpfs as backing store for ciphertext
+    # 2. gocryptfs -init with random password
+    # 3. gocryptfs mount to decrypted view
+    # 4. TMPDIR points to decrypted view
+    setup_cmd="
+CIPHER_DIR=\$(mktemp -d /tmp/cryptmp-cipher-\$\$.XXXXXX)
+PLAIN_DIR=\$(mktemp -d /tmp/cryptmp-\$\$.XXXXXX)
+mount -t tmpfs -o size=$size,mode=0700 tmpfs \"\$CIPHER_DIR\"
+PASS=\$(head -c 32 /dev/urandom | base64)
+echo \"\$PASS\" | gocryptfs -init -q -passfile /dev/stdin \"\$CIPHER_DIR\"
+echo \"\$PASS\" | gocryptfs -q -passfile /dev/stdin \"\$CIPHER_DIR\" \"\$PLAIN_DIR\"
+export TMPDIR=\"\$PLAIN_DIR\"
+cd \"\$PLAIN_DIR\"
 "
 
     if [ $# -eq 0 ]; then

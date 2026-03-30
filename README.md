@@ -35,8 +35,13 @@ Flag takes precedence over env var.
 Creates a `tmpfs` mount inside a private mount namespace via `unshare`. The
 namespace is invisible to all other processes. When the process dies — for any
 reason, including SIGKILL — the kernel tears down the namespace and everything
-in it. No cleanup code needed. `tmpfs` is always unencrypted RAM, so `-n` has
-no effect on Linux.
+in it. No cleanup code needed.
+
+If [gocryptfs](https://github.com/rfjakob/gocryptfs) is installed, cryptmp
+layers an encrypted FUSE overlay on top of the tmpfs. Files written to TMPDIR
+are transparently encrypted before hitting the RAM-backed store. If gocryptfs
+is not available, cryptmp falls back to a plain tmpfs with namespace isolation
+only and prints a warning. Use `-n` to skip encryption intentionally.
 
 ### macOS
 
@@ -98,3 +103,4 @@ OS-specific tools:
 
 - **macOS**: `hdiutil`, `diskutil`, `openssl`
 - **Linux**: `unshare`, `mount`
+- **Linux (encrypted)**: [gocryptfs](https://github.com/rfjakob/gocryptfs) (optional)

@@ -42,7 +42,7 @@ for distro in $distros; do
         continue
     fi
 
-    if docker run --rm --cap-add SYS_ADMIN "$tag" 2>&1; then
+    if docker run --rm --cap-add SYS_ADMIN --device /dev/fuse "$tag" 2>&1; then
         passed=$((passed + 1))
     else
         failed=$((failed + 1))
