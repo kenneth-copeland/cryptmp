@@ -8,7 +8,7 @@ USER_SHELL="${SHELL:-/bin/sh}"
 # --- Usage ---
 usage() {
     cat <<'EOF'
-Usage: cryptmp [-s SIZE] [-n] [COMMAND [ARGS...]]
+Usage: cryptmp [-s SIZE] [-n | -e] [COMMAND [ARGS...]]
 
 Create an encrypted RAM-backed temp directory, export TMPDIR to it,
 and run COMMAND (or an interactive shell). The mount is destroyed on exit.
@@ -23,11 +23,16 @@ Options:
                 encryption adds ~2s to startup; this flag skips it.
                 On Linux, skips gocryptfs overlay.
                 Also settable via CRYPTMP_ENCRYPT=0 env var.
+  -e, --require-encrypt
+                Require encryption. Fail with an error if encryption
+                is not available (e.g., gocryptfs not installed on
+                Linux). Also settable via CRYPTMP_ENCRYPT=require.
   -h, --help    Show this help.
 
 Environment variables:
-  CRYPTMP_SIZE=512M     Default mount size
-  CRYPTMP_ENCRYPT=0     Disable encryption (same as -n)
+  CRYPTMP_SIZE=512M       Default mount size
+  CRYPTMP_ENCRYPT=0       Disable encryption (same as -n)
+  CRYPTMP_ENCRYPT=require Require encryption (same as -e)
 
 Examples:
   cryptmp                        # encrypted RAM disk + interactive shell
@@ -41,28 +46,34 @@ EOF
 
 # --- Parse options (short and long) ---
 OPT_NO_ENCRYPT=""
+OPT_REQUIRE_ENCRYPT=""
 OPT_SIZE=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        -h|--help)        usage ;;
-        -n|--no-encrypt)  OPT_NO_ENCRYPT=1; shift ;;
-        -s|--size)        OPT_SIZE="$2"; shift 2 ;;
-        --size=*)         OPT_SIZE="${1#--size=}"; shift ;;
-        -s*)              OPT_SIZE="${1#-s}"; shift ;;
-        --)               shift; break ;;
-        -*)               echo "cryptmp: unknown option '$1'" >&2; usage ;;
-        *)                break ;;
+        -h|--help)            usage ;;
+        -n|--no-encrypt)      OPT_NO_ENCRYPT=1; shift ;;
+        -e|--require-encrypt) OPT_REQUIRE_ENCRYPT=1; shift ;;
+        -s|--size)            OPT_SIZE="$2"; shift 2 ;;
+        --size=*)             OPT_SIZE="${1#--size=}"; shift ;;
+        -s*)                  OPT_SIZE="${1#-s}"; shift ;;
+        --)                   shift; break ;;
+        -*)                   echo "cryptmp: unknown option '$1'" >&2; usage ;;
+        *)                    break ;;
     esac
 done
 
 # Size precedence: -s flag > CRYPTMP_SIZE env > default
 DISK_SIZE="${OPT_SIZE:-${CRYPTMP_SIZE:-$DEFAULT_SIZE}}"
 
-# Encryption: -n flag disables, CRYPTMP_ENCRYPT=0 disables, default on
+# Encryption mode: -n disables, -e requires, default is auto (encrypt if possible)
 if [ -n "$OPT_NO_ENCRYPT" ]; then
     ENCRYPT=0
+elif [ -n "$OPT_REQUIRE_ENCRYPT" ]; then
+    ENCRYPT=require
 elif [ "${CRYPTMP_ENCRYPT:-1}" = "0" ]; then
     ENCRYPT=0
+elif [ "${CRYPTMP_ENCRYPT:-}" = "require" ]; then
+    ENCRYPT=require
 else
     ENCRYPT=1
 fi
@@ -124,9 +135,15 @@ run_linux() {
     size="$1"
     shift
 
-    if [ "$ENCRYPT" = "1" ] && command -v gocryptfs >/dev/null 2>&1; then
+    if [ "$ENCRYPT" != "0" ] && command -v gocryptfs >/dev/null 2>&1; then
         run_linux_encrypted "$size" "$@"
     else
+        if [ "$ENCRYPT" = "require" ]; then
+            echo "cryptmp: encryption required but gocryptfs is not installed" >&2
+            echo "cryptmp: install gocryptfs to support encryption on Linux" >&2
+            echo "cryptmp: https://github.com/rfjakob/gocryptfs" >&2
+            exit 1
+        fi
         if [ "$ENCRYPT" = "1" ] && ! command -v gocryptfs >/dev/null 2>&1; then
             echo "cryptmp: gocryptfs not found, falling back to unencrypted tmpfs" >&2
             echo "cryptmp: install gocryptfs for encryption on Linux" >&2

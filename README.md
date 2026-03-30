@@ -24,6 +24,7 @@ CRYPTMP_ENCRYPT=0 cryptmp sh   # plain via env var
 |-------|------|---------|-------------|
 | `-s` | `--size SIZE` | `CRYPTMP_SIZE` | Mount size (e.g., `256M`, `1G`). Default: `512M` |
 | `-n` | `--no-encrypt` | `CRYPTMP_ENCRYPT=0` | Skip encryption (plain RAM disk) |
+| `-e` | `--require-encrypt` | `CRYPTMP_ENCRYPT=require` | Require encryption; fail if unavailable |
 | `-h` | `--help` | | Show help |
 
 Flag takes precedence over env var.
