@@ -1,0 +1,6 @@
+FROM fedora:latest
+COPY cryptmp /usr/local/bin/cryptmp
+COPY tests/ /tests/
+RUN chmod +x /usr/local/bin/cryptmp /tests/*.sh
+ENV CRYPTMP=/usr/local/bin/cryptmp
+ENTRYPOINT ["/tests/run-tests.sh"]

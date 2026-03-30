@@ -1,0 +1,196 @@
+#!/bin/sh
+set -eu
+
+# --- Defaults ---
+DEFAULT_SIZE="512M"
+USER_SHELL="${SHELL:-/bin/sh}"
+
+# --- Usage ---
+usage() {
+    cat <<'EOF'
+Usage: cryptmp [-s SIZE] [COMMAND [ARGS...]]
+
+Create an encrypted RAM-backed temp directory, export TMPDIR to it,
+and run COMMAND (or an interactive shell). The mount is destroyed on exit.
+
+Options:
+  -s SIZE   Mount size (e.g., 256M, 1G). Default: 512M
+            Also settable via CRYPTMP_SIZE env var.
+            Flag takes precedence over env var.
+  -h        Show this help
+
+Examples:
+  cryptmp                        # interactive shell
+  cryptmp glumi ./network.ts     # run a command
+  cryptmp -s 1G make deploy      # 1GB scratch space
+  CRYPTMP_SIZE=2G cryptmp bash   # via env var
+EOF
+    exit 0
+}
+
+# --- Parse options ---
+OPT_SIZE=""
+while getopts "s:h" opt; do
+    case "$opt" in
+        s) OPT_SIZE="$OPTARG" ;;
+        h) usage ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+# Size precedence: -s flag > CRYPTMP_SIZE env > default
+DISK_SIZE="${OPT_SIZE:-${CRYPTMP_SIZE:-$DEFAULT_SIZE}}"
+
+# --- Detect platform ---
+detect_platform() {
+    case "$(uname -s)" in
+        Linux)  echo linux ;;
+        Darwin) echo darwin ;;
+        *)      echo unknown ;;
+    esac
+}
+
+# --- Interactive shell prompt setup ---
+# Sets PS1 for the user's shell and execs into it
+exec_interactive_shell() {
+    case "$(basename "$USER_SHELL")" in
+        bash)
+            export PS1='[cryptmp] \w\$ '
+            exec "$USER_SHELL" --norc --noprofile
+            ;;
+        zsh)
+            export PS1='[cryptmp] %~%# '
+            exec "$USER_SHELL" --no-rcs
+            ;;
+        fish)
+            exec "$USER_SHELL" --no-config -C 'function fish_prompt; echo "[cryptmp] "(prompt_pwd)"> "; end'
+            ;;
+        *)
+            export PS1='[cryptmp] $ '
+            exec "$USER_SHELL"
+            ;;
+    esac
+}
+
+# --- macOS: reap stale volumes from dead sessions ---
+reap_stale_volumes() {
+    for vol in /Volumes/cryptmp-*; do
+        [ -d "$vol" ] || continue
+        # Skip the init scratch volumes
+        case "$vol" in *cryptmp-init-*) continue ;; esac
+        pid="${vol##*-}"
+        if ! kill -0 "$pid" 2>/dev/null; then
+            dev=$(diskutil info "$vol" 2>/dev/null | awk '/Device Node/ {print $NF}')
+            if [ -n "$dev" ]; then
+                phys_store=$(diskutil apfs list "$dev" 2>/dev/null \
+                    | awk '/Physical Store/ {print $NF}')
+                if [ -n "$phys_store" ]; then
+                    ram_disk=$(echo "$phys_store" | sed 's/s[0-9]*$//')
+                    hdiutil detach "$ram_disk" -force 2>/dev/null || true
+                fi
+            fi
+        fi
+    done
+}
+
+# --- Linux implementation ---
+run_linux() {
+    size="$1"
+    shift
+
+    setup_cmd="
+MOUNT_POINT=\$(mktemp -d /tmp/cryptmp-\$\$.XXXXXX)
+mount -t tmpfs -o size=$size,mode=0700 tmpfs \"\$MOUNT_POINT\"
+export TMPDIR=\"\$MOUNT_POINT\"
+cd \"\$MOUNT_POINT\"
+"
+
+    if [ $# -eq 0 ]; then
+        exec unshare -m -r --propagation private /bin/sh -c \
+            "${setup_cmd}export SHELL=\"$USER_SHELL\"; exec $USER_SHELL"
+    else
+        exec unshare -m -r --propagation private /bin/sh -c \
+            "${setup_cmd}"'exec "$@"' -- "$@"
+    fi
+}
+
+# --- macOS implementation ---
+run_mac() {
+    size="$1"
+    shift
+
+    # Parse size string to megabytes
+    case "$size" in
+        *G|*g) size_mb=$(( ${size%[Gg]} * 1024 )) ;;
+        *M|*m) size_mb=${size%[Mm]} ;;
+        *)     echo "cryptmp: invalid size '$size' (use e.g. 512M or 1G)" >&2; exit 1 ;;
+    esac
+    sectors=$(( size_mb * 2048 ))
+
+    # Reap orphaned volumes from previous crashed sessions
+    reap_stale_volumes
+
+    # Create RAM device
+    ram_dev=$(hdiutil attach -nomount "ram://$sectors") || {
+        echo "cryptmp: failed to allocate RAM device" >&2
+        exit 1
+    }
+    ram_dev=$(echo "$ram_dev" | xargs)  # trim whitespace
+
+    # Initialize APFS container on the raw RAM device
+    scratch_name="cryptmp-init-$$"
+    if ! diskutil eraseDisk APFS "$scratch_name" "$ram_dev" >/dev/null 2>&1; then
+        hdiutil detach "$ram_dev" -force 2>/dev/null
+        echo "cryptmp: failed to initialize APFS container" >&2
+        exit 1
+    fi
+
+    # Find the container reference and initial volume
+    # Line: "1:  Apple_APFS Container disk10  536.8 MB  disk9s1"
+    container_ref=$(diskutil list "$ram_dev" | awk '/Apple_APFS Container/ {for(i=1;i<=NF;i++) if($i=="Container") print $(i+1)}')
+    initial_vol="${container_ref}s1"
+
+    # Delete the unencrypted initial volume
+    if [ -n "$initial_vol" ]; then
+        diskutil apfs deleteVolume "$initial_vol" >/dev/null 2>&1 || true
+    fi
+
+    # Generate one-time encryption key
+    pass=$(openssl rand -base64 32)
+
+    # Add encrypted volume to the container
+    vol_name="cryptmp-$$"
+    if ! echo "$pass" | diskutil apfs addVolume "$container_ref" APFS "$vol_name" -stdinpassphrase >/dev/null 2>&1; then
+        hdiutil detach "$ram_dev" -force 2>/dev/null
+        echo "cryptmp: failed to create encrypted volume" >&2
+        exit 1
+    fi
+
+    vol_path="/Volumes/$vol_name"
+    chmod 0700 "$vol_path"
+
+    # Ensure cleanup on exit — detach the RAM device entirely
+    trap "hdiutil detach '$ram_dev' -force >/dev/null 2>&1" EXIT
+
+    # Export TMPDIR so child processes use the encrypted mount
+    export TMPDIR="$vol_path"
+    cd "$vol_path"
+
+    if [ $# -eq 0 ]; then
+        exec_interactive_shell
+    else
+        "$@"
+    fi
+}
+
+# --- Main ---
+PLATFORM=$(detect_platform)
+case "$PLATFORM" in
+    linux)  run_linux "$DISK_SIZE" "$@" ;;
+    darwin) run_mac "$DISK_SIZE" "$@" ;;
+    *)
+        echo "cryptmp: unsupported platform '$(uname -s)'" >&2
+        exit 1
+        ;;
+esac
